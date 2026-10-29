@@ -1638,8 +1638,12 @@ describe("ClaudeAdapterV2 resume compaction", () => {
           yield* Fiber.interrupt(safetyRequest);
         }
         const longQuestion = `Choose a deployment target: ${"region ".repeat(80)}`;
-        const questionRequestEvent = yield* runtime.events.pipe(
-          Stream.filter((event) => event.type === "runtime_request.updated"),
+        const questionAskedEvent = yield* runtime.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.kind === "user_input",
+          ),
           Stream.runHead,
           Effect.forkScoped,
         );
@@ -1665,8 +1669,8 @@ describe("ClaudeAdapterV2 resume compaction", () => {
               requestId: "request-question-full-access",
             },
           ),
-        ).pipe(Effect.forkScoped);
-        const questionEvent = yield* Fiber.join(questionRequestEvent);
+        );
+        const questionEvent = yield* Fiber.join(questionAskedEvent);
         assert.isTrue(Option.isSome(questionEvent));
         if (
           Option.isNone(questionEvent) ||
@@ -1674,28 +1678,14 @@ describe("ClaudeAdapterV2 resume compaction", () => {
         ) {
           return;
         }
-        yield* runtime.respondToRuntimeRequest({
-          requestId: questionEvent.value.runtimeRequest.id,
-          answers: { [longQuestion]: ["Production", "Staging"] },
-        });
-        assert.deepEqual(yield* Fiber.join(questionResult), {
-          behavior: "allow",
-          updatedInput: {
-            questions: [
-              {
-                header: "Target",
-                question: longQuestion,
-                options: [
-                  { label: "Production", description: "Deploy to production." },
-                  { label: "Staging", description: "Deploy to staging." },
-                ],
-                multiSelect: true,
-              },
-            ],
-            answers: { [longQuestion]: "Production, Staging" },
-          },
-          toolUseID: "tool-question-full-access",
-        });
+        const request = questionEvent.value.runtimeRequest;
+        assert.equal(request.status, "pending");
+        assert.deepEqual(request.responseCapability, { type: "message" });
+        assert.equal(questionResult?.behavior, "deny");
+        assert.include(
+          questionResult?.behavior === "deny" ? questionResult.message : "",
+          `request ${request.id}`,
+        );
         const longPlan = `# Deployment plan\n\n${"Validate every region before promotion.\n".repeat(120)}`;
         const proposedPlanEvent = yield* runtime.events.pipe(
           Stream.filter((event) => event.type === "plan.updated"),
@@ -10771,6 +10761,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         // The CLI cancels a request once a PermissionRequest hook has answered it.
         // @effect-diagnostics-next-line abortControllerInEffect:off - Claude, not the test fiber, withdraws the request.
         const withdrawal = new AbortController();
+        // A question is answered by message at once, so it can only be withdrawn mid-callback.
+        if (toolName === "AskUserQuestion") withdrawal.abort();
         const permission = yield* Effect.promise(() =>
           harness.getOpenedOptions()!.canUseTool!(toolName, toolInput, {
             signal: withdrawal.signal,

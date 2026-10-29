@@ -1758,6 +1758,7 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__list_scheduled_tasks",
   "mcp__t3-code__t3_thread_list",
   "mcp__t3-code__t3_thread_wait",
+
   "mcp__t3-code__t3_worktree_status",
   "mcp__t3-code__t3_worktree_list",
   "mcp__t3-code__t3_project_list",
@@ -4378,6 +4379,10 @@ export function claudeUserInputQuestions(
       },
     ];
   });
+}
+
+function claudeMessageQuestionResult(requestId: string): string {
+  return `T3 showed these questions to the user without waiting (request ${requestId}; see t3_pending_request). They stay open across turns, and the answers arrive later as one user message. If you cannot continue without them, end your turn now. Otherwise keep working.`;
 }
 
 export function claudeSdkUserInputAnswers(
@@ -9864,7 +9869,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           toolName: Parameters<CanUseTool>[0],
           toolInput: Parameters<CanUseTool>[1],
           callbackOptions: Parameters<CanUseTool>[2],
-          options?: { readonly startToolCall?: boolean },
+          options?: {
+            readonly startToolCall?: boolean;
+            /** T3's own prompts still wait for the answer inside the turn. */
+            readonly liveQuestion?: boolean;
+          },
         ) {
           const context = yield* Ref.get(activeTurn);
           if (context === null) {
@@ -9914,6 +9923,52 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 parentToolUseId: null,
               });
             }
+          }
+
+          if (toolName === "AskUserQuestion" && options?.liveQuestion !== true) {
+            // A live native question dies when the turn ends or a subagent message lands, so it
+            // is answered by message instead and the agent decides whether to stop.
+            const artifacts = yield* buildApprovalRequestArtifacts({
+              context,
+              nativeItemId: nativeRequestId,
+              nativeRequestId,
+              requestKind: "user_input",
+              questions: claudeUserInputQuestions(nativeToolInput),
+            });
+            yield* Effect.all(
+              [
+                emitProviderEvent({
+                  type: "node.updated",
+                  driver: CLAUDE_PROVIDER,
+                  node: artifacts.node,
+                }),
+                emitProviderEvent({
+                  type: "runtime_request.updated",
+                  driver: CLAUDE_PROVIDER,
+                  runtimeRequest: { ...artifacts.request, responseCapability: { type: "message" } },
+                }),
+                emitProviderEvent({
+                  type: "turn_item.updated",
+                  driver: CLAUDE_PROVIDER,
+                  turnItem: artifacts.turnItem,
+                }),
+              ],
+              { concurrency: 1 },
+            );
+            // Withdrawn before this deny was sent, Claude never learns the answer comes by
+            // message, so the card would wait across turns for nothing.
+            if (callbackOptions.signal.aborted) {
+              yield* cancelWithdrawnRequest(artifacts);
+              return {
+                behavior: "deny",
+                message: "User cancelled tool execution.",
+              } satisfies PermissionResult;
+            }
+            return {
+              behavior: "deny",
+              message: claudeMessageQuestionResult(artifacts.request.id),
+              toolUseID: callbackOptions.toolUseID,
+            } satisfies PermissionResult;
           }
 
           if (toolName === "AskUserQuestion") {
@@ -10313,7 +10368,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 },
                 // The dialog is a control request, not a tool call, so no
                 // tool_result would ever settle a tool row started for it.
-                { startToolCall: false },
+                { startToolCall: false, liveQuestion: true },
               );
               if (result.behavior !== "allow") return { behavior: "cancelled" as const };
               const answers =
