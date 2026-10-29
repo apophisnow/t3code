@@ -3225,6 +3225,14 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     requestId: RuntimeRequestId,
   }),
+  /** Agent questions that wait across turns; the answers arrive as one user message. */
+  Schema.Struct({
+    type: Schema.Literal("thread.user-input.ask"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    questions: Schema.Array(OrchestrationV2UserInputQuestion).check(Schema.isMinLength(1)),
+  }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),

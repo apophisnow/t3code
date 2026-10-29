@@ -1624,17 +1624,13 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
-  it.effect("dismisses message-capable questions directly and while settling", () =>
+  it.effect("asks, answers, and dismisses message-capable questions", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const eventSink = yield* EventSink.EventSinkV2;
 
-      const seedQuestion = Effect.fn("runtimeLayerTest.seedQuestion")(function* (name: string) {
+      const createThread = Effect.fn("runtimeLayerTest.createThread")(function* (name: string) {
         const threadId = ThreadId.make(`${name}-thread`);
-        const requestId = RuntimeRequestId.make(`${name}-request`);
-        const nodeId = NodeId.make(`${name}-node`);
-        const itemId = TurnItemId.make(`${name}-item`);
-        const now = yield* DateTime.now;
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make(`${name}-create`),
@@ -1649,6 +1645,15 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           branch: null,
           worktreePath: process.cwd(),
         });
+        return threadId;
+      });
+
+      const seedQuestion = Effect.fn("runtimeLayerTest.seedQuestion")(function* (name: string) {
+        const threadId = yield* createThread(name);
+        const requestId = RuntimeRequestId.make(`${name}-request`);
+        const nodeId = NodeId.make(`${name}-node`);
+        const itemId = TurnItemId.make(`${name}-item`);
+        const now = yield* DateTime.now;
         yield* eventSink.write({
           commandId: CommandId.make(`${name}-seed`),
           events: [
@@ -1725,6 +1730,39 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         });
         return { threadId, requestId, nodeId, itemId };
       });
+
+      const askedThreadId = yield* createThread("runtime-ask-question");
+      const askedRequestId = RuntimeRequestId.make("runtime-ask-question-request");
+      const ask = (commandId: string) =>
+        orchestrator.dispatch({
+          type: "thread.user-input.ask",
+          commandId: CommandId.make(commandId),
+          threadId: askedThreadId,
+          requestId: askedRequestId,
+          questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [] }],
+        });
+      yield* ask("runtime-ask-question-command");
+      yield* ask("runtime-ask-question-retry");
+      const asked = yield* orchestrator.getThreadProjection(askedThreadId);
+      assert.lengthOf(asked.runtimeRequests, 1);
+      assert.equal(asked.runtimeRequests[0]?.status, "pending");
+      assert.deepEqual(asked.runtimeRequests[0]?.responseCapability, { type: "message" });
+      const askedItems = asked.turnItems.filter((item) => item.type === "user_input_request");
+      assert.lengthOf(askedItems, 1);
+      assert.equal(askedItems[0]?.status, "waiting");
+      yield* orchestrator.dispatch({
+        type: "runtime-request.respond",
+        commandId: CommandId.make("runtime-ask-question-answer"),
+        threadId: askedThreadId,
+        requestId: askedRequestId,
+        answers: { choice: "Yes" },
+      });
+      const answered = yield* orchestrator.getThreadProjection(askedThreadId);
+      assert.equal(answered.runtimeRequests[0]?.status, "resolved");
+      assert.lengthOf(
+        answered.messages.filter((message) => message.role === "user"),
+        1,
+      );
 
       const dismissed = yield* seedQuestion("runtime-dismiss-question");
       yield* orchestrator.dispatch({

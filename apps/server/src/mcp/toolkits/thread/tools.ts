@@ -123,20 +123,37 @@ const question = Schema.Struct({
   initialAnswer: Schema.optional(Schema.String),
   required: Schema.optional(Schema.Boolean),
 });
+const askedQuestion = Schema.Struct({
+  header: TrimmedNonEmptyString,
+  question: TrimmedNonEmptyString,
+  options: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        label: TrimmedNonEmptyString,
+        description: Schema.optional(TrimmedNonEmptyString),
+      }),
+    ).check(Schema.isMaxLength(8)),
+  ),
+  multiSelect: Schema.optional(Schema.Boolean),
+});
 const PendingRequestTool = Tool.make("t3_pending_request", {
   ...commandTool,
   description:
-    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request.",
+    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request. ask: leave `questions` for the user without blocking your turn; use it for anything that can wait instead of asking in chat. They stay open across turns and the answers arrive later as one user message. dismiss: withdraw `requestId` as soon as it is stale, such as when the user answered in chat or the plan changed.",
   parameters: Schema.Struct({
-    action: Schema.Literals(["list", "read", "respond"]),
+    action: Schema.Literals(["list", "read", "respond", "ask", "dismiss"]),
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     requestId: Schema.optional(RuntimeRequestId),
     answers: Schema.optional(ProviderUserInputAnswers),
+    questions: Schema.optional(
+      Schema.Array(askedQuestion).check(Schema.isMinLength(1), Schema.isMaxLength(4)),
+    ),
   }),
   success: Schema.Union([
     Schema.Struct({ requestIds: Schema.Array(RuntimeRequestId) }),
     Schema.Struct({ requestId: RuntimeRequestId, questions: Schema.Array(question) }),
+    Schema.Struct({ requestId: RuntimeRequestId }),
     OrchestrationV2DispatchCommandResult,
   ]),
 })

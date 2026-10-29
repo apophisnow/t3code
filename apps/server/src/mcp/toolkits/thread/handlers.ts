@@ -1,12 +1,13 @@
 import {
   type CommandId,
-  type RuntimeRequestId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
@@ -222,7 +223,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     ),
   ),
   t3_pending_request: McpToolAccess.either(
-    (input) => input.action !== "respond",
+    (input) => input.action === "list" || input.action === "read",
     McpToolAccess.reads((input) =>
       Effect.gen(function* () {
         if (input.action === "list") {
@@ -240,7 +241,52 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     ),
     writesThread((input) =>
       Effect.gen(function* () {
+        if (input.action === "ask") {
+          const questions = yield* required(input.questions, "questions");
+          const { threads, projection } = yield* readThread(input.threadId);
+          const crypto = yield* Crypto.Crypto;
+          const requestId = RuntimeRequestId.make(
+            `runtime-request:question:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`,
+          );
+          yield* threads
+            .dispatch({
+              type: "thread.user-input.ask",
+              commandId: yield* newCommandId(),
+              threadId: projection.thread.id,
+              requestId,
+              questions: questions.map((question, index) => ({
+                id: `question-${index + 1}`,
+                header: question.header,
+                question: question.question,
+                options: (question.options ?? []).map((option) => ({
+                  label: option.label,
+                  description: option.description ?? option.label,
+                })),
+                allowCustomAnswer: true,
+                ...(question.multiSelect === undefined
+                  ? {}
+                  : { multiSelect: question.multiSelect }),
+              })),
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+          return { requestId };
+        }
         const requestId = yield* required(input.requestId, "requestId");
+        if (input.action === "dismiss") {
+          const { threads, projection } = yield* readQuestion({
+            threadId: input.threadId,
+            requestId,
+          });
+          const result = yield* threads
+            .dispatch({
+              type: "thread.user-input.dismiss",
+              threadId: projection.thread.id,
+              commandId: yield* newCommandId(),
+              requestId,
+            })
+            .pipe(Effect.mapError(dispatchFailure));
+          return { sequence: result.sequence };
+        }
         const answers = yield* required(input.answers, "answers");
         const { threads, projection } = yield* readQuestion({
           threadId: input.threadId,

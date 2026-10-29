@@ -292,6 +292,16 @@ export function summarizeT3ToolCalls(
         quantity(countEntities(entityIds("requestId")), "pending question request"),
       );
       break;
+    case "question-ask":
+      label = phrase("Asked", "ask", `questions ${times}`);
+      break;
+    case "question-dismiss":
+      label = phrase(
+        "Dismissed",
+        "dismiss",
+        quantity(countEntities(entityIds("requestId")), "pending question request"),
+      );
+      break;
     case "secret-request":
       label = phrase("Asked for", "ask for", quantity(selected.length, "secret"));
       break;

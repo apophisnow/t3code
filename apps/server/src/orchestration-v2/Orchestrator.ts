@@ -27,7 +27,7 @@ import {
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   MessageId,
-  type NodeId,
+  NodeId,
   type ModelSelection,
   OrchestrationV2Command,
   type OrchestrationV2InternalCommand,
@@ -525,6 +525,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "runtime-request.respond":
     case "runtime-request.delivery.fail":
     case "thread.user-input.dismiss":
+    case "thread.user-input.ask":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
     case "thread.background-work.settle":
@@ -8933,6 +8934,97 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchThreadUserInputAsk = Effect.fn("Orchestrator.dispatchThreadUserInputAsk")(
+    function* (
+      command: Extract<OrchestrationV2Command, { readonly type: "thread.user-input.ask" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runs", "runtimeRequests"])
+        .pipe(
+          Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
+        );
+      if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} is not active.`,
+        });
+      }
+      // Retried asks reuse their request id.
+      if (projection.runtimeRequests.some((request) => request.id === command.requestId)) return;
+      const run = latestExecutedRun(projection.runs);
+      const runId = run?.id ?? null;
+      const nodeId = NodeId.make(`node:question:${command.requestId}`);
+      const now = yield* DateTime.now;
+      const emitEvent = emit(events, command);
+      const scope = { threadId: command.threadId, ...(runId === null ? {} : { runId }), nodeId };
+      yield* emitEvent({
+        type: "node.updated",
+        ...scope,
+        occurredAt: now,
+        payload: {
+          id: nodeId,
+          threadId: command.threadId,
+          runId,
+          parentNodeId: run?.rootNodeId ?? null,
+          rootNodeId: run?.rootNodeId ?? nodeId,
+          kind: "user_input_request",
+          status: "waiting",
+          countsForRun: false,
+          providerThreadId: run?.providerThreadId ?? null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: command.requestId,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: null,
+        },
+      });
+      yield* emitEvent({
+        type: "runtime-request.updated",
+        ...scope,
+        occurredAt: now,
+        payload: {
+          id: command.requestId,
+          nodeId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "user_input",
+          status: "pending",
+          responseCapability: { type: "message" },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      });
+      yield* emitEvent({
+        type: "turn-item.updated",
+        ...scope,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`turn-item:question:${command.requestId}`),
+          threadId: command.threadId,
+          runId,
+          nodeId,
+          providerThreadId: run?.providerThreadId ?? null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: yield* nextTurnItemOrdinal(projection),
+          status: "waiting",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "user_input_request",
+          requestId: command.requestId,
+          questions: command.questions,
+          responseMode: "message",
+        },
+      });
+    },
+  );
+
   const dispatchQueuedMessagePromoteToSteer = Effect.fn(
     "Orchestrator.dispatchQueuedMessagePromoteToSteer",
   )(function* (
@@ -12612,6 +12704,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.user-input.dismiss":
         yield* dispatchThreadUserInputDismiss(command, events, effects);
         break;
+      case "thread.user-input.ask":
+        yield* dispatchThreadUserInputAsk(command, events);
+        break;
       case "subagent.stop":
         yield* dispatchSubagentStop(command, events, effects);
         break;
@@ -12887,7 +12982,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.stop" ||
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
-          command.type === "thread.guest-share.close",
+          command.type === "thread.guest-share.close" ||
+          command.type === "thread.user-input.ask",
         (_planned) =>
           new OrchestratorDispatchError({
             commandId: command.commandId,
